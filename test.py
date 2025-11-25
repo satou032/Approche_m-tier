@@ -1,265 +1,293 @@
-"""
-Stock Dashboard Streamlit
-- Récupère les données soit depuis des fichiers JSON locaux (ex: Hermes.json) soit via yfinance
-- Calcule RSI (14), SMA(5) et SMA(20)
-- Affiche graphiques (bougies, SMA, RSI)
-- Donne un signal d'achat/vente simple basé sur RSI et tendance SMA
-- Affiche une NOTE NUMÉRIQUE finale (score) et une interprétation (Strong Buy/Buy/Hold/Sell/Strong Sell)
-
-Pour exécuter:
-pip install streamlit yfinance pandas plotly
-streamlit run stock_dashboard_streamlit.py
-
-"""
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yfinance as yf
-import json
-import os
-from datetime import datetime, timedelta
 import plotly.graph_objects as go
+import numpy as np 
 
-st.set_page_config(layout="wide", page_title="Dashboard Actions — RSI & SMA")
+st.set_page_config(layout="wide", page_title="Dashboard d'Analyse Technique")
+st.title("📊 Dashboard d'Analyse Technique")
 
-# ---------- Utilities ----------
-
-def load_from_json(name, ticker):
-    filename = f"{name}.json"
-    if os.path.exists(filename):
-        try:
-            with open(filename, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            records = payload.get("data", [])
-            if not records:
-                return None
-            df = pd.DataFrame(records)
-            if "Date" in df.columns:
-                df["Date"] = pd.to_datetime(df["Date"]) 
-                df = df.set_index("Date")
-            return df
-        except Exception as e:
-            st.warning(f"Impossible de lire {filename} : {e}")
-            return None
-    return None
-
-
-def download_yfinance(ticker, period="1y", interval="1d"):
-    df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
-    if df.empty:
-        return None
-    df.index = pd.to_datetime(df.index)
-    return df
-
-
-def compute_sma(df, window):
-    return df["Close"].rolling(window=window).mean()
-
-
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-    rs = avg_gain / (avg_loss.replace(0, np.nan))
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(0)
-
-
-def score_from_indicators(latest_rsi, sma5_latest, sma20_latest):
-    """Calcule une note numérique basée sur RSI et SMA crossover.
-    Méthode simple et pédagogique :
-      - RSI: survente -> positif, surachat -> négatif
-      - SMA crossover: tendance haussière -> positif, baissière -> négatif
-    Retourne tuple (score, label, rating_5)
-    score: valeur entre -100 et 100
-    rating_5: note normalisée entre 0 et 5
-    """
-    if latest_rsi is None or (sma5_latest is None) or (sma20_latest is None):
-        return None, "No data", None
-
-    score = 0.0
-    # RSI contribution
-    if latest_rsi < 30:
-        score += 50  # forte survente
-    elif latest_rsi < 50:
-        score += 20  # légèrement positif
-    elif latest_rsi <= 70:
-        score += 0   # neutre
-    else:
-        score -= 50  # surachat -> négatif
-
-    # SMA contribution
-    if sma5_latest > sma20_latest:
-        score += 30
-    elif sma5_latest < sma20_latest:
-        score -= 30
-
-    # Normalisation (cap)
-    if score > 100:
-        score = 100
-    if score < -100:
-        score = -100
-
-    # Label mapping
-    if score >= 40:
-        label = "Strong Buy"
-    elif score >= 10:
-        label = "Buy"
-    elif score > -10:
-        label = "Hold"
-    elif score >= -39:
-        label = "Sell"
-    else:
-        label = "Strong Sell"
-
-    # Convertir score [-100,100] en note sur 5 (0 = très mauvais, 5 = excellent)
-    # mapping linéaire : -100 -> 0, 100 -> 5
-    rating_5 = round(((score + 100) / 200) * 5, 2)
-
-    return score, label, rating_5
-
-# ---------- Sidebar ----------
-st.sidebar.title("Paramètres")
+# ---------------------------
+# Choix entreprise et technique
+# ---------------------------
 companies = {
+    "TotalEnergies": "TTE.PA", 
+    "Airbus": "AIR.PA", 
     "Hermes": "RMS.PA",
-    "Dassault_Systèmes": "DSY.PA",
-    "Sopra_Steria": "SOP.PA",
-    "TotalEnergies": "TTE.PA",
-    "Airbus": "AIR.PA"
+    "Dassault Systèmes": "DSY.PA",
+    "Sopra Steria": "SOP.PA"
 }
+selected_company = st.selectbox("Choisir une entreprise", list(companies.keys()))
 
-selected = st.sidebar.selectbox("Choisir une entreprise", list(companies.keys()))
-period_days = st.sidebar.selectbox("Période (jours)", [30, 90, 180, 365], index=3)
-period_str = f"{period_days}d"
-interval = st.sidebar.selectbox("Intervalle", ["1d", "1wk"], index=0)
+techniques = [
+    "Graphe Classique",
+    "Leçon 1 : Les Tendances",
+    "Leçon 2 : Les Moyennes Mobiles",
+    "Leçon 3 : La MACD",
+    "Leçon 4 : Les Bollingers",
+    "Leçon 5 : Le Stochastique",
+    "Leçon 6 : Les Chandeliers",
+    "Leçon 7 : Le RSI",
+    "Leçon 8 : Le Mouvement Directionnel",
+    "Leçon 9 : Les Volumes",
+    "Leçon 14 : L'épaule-tête-épaule"
+]
+selected_technique = st.selectbox("Choisir une technique", techniques)
 
-# ---------- Data loading ----------
-st.title("Dashboard technique — RSI & SMA (5)")
+# ---------------------------
+# Télécharger les données
+# ---------------------------
+ticker = companies[selected_company]
+# Utilisation de 1 an de données journalières
+df = yf.download(ticker, period="1y", interval="1d", auto_adjust=True) 
+df.reset_index(inplace=True)
 
-ticker = companies[selected]
+# Ligne de sécurité pour éviter les problèmes de MultiIndex (au cas où)
+df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns] 
 
-df = load_from_json(selected, ticker)
-if df is None:
-    df = download_yfinance(ticker, period=f"{period_days}d", interval=interval)
-    if df is None:
-        st.error("Impossible de récupérer des données pour ce ticker.")
-        st.stop()
-else:
-    start = pd.to_datetime("today") - pd.Timedelta(days=period_days)
-    df = df[df.index >= start]
-
-for col in ["Open", "High", "Low", "Close", "Volume"]:
-    if col not in df.columns:
-        st.error(f"Colonne manquante: {col}")
-        st.stop()
-
+# ---------------------------
 # Calculs techniques
-df = df.sort_index()
-df["SMA_5"] = compute_sma(df, 5)
-df["SMA_20"] = compute_sma(df, 20)
-df["RSI_14"] = compute_rsi(df["Close"], period=14)
+# ---------------------------
 
-latest = df.iloc[-1]
-latest_rsi = float(latest["RSI_14"]) if not pd.isna(latest["RSI_14"]) else None
-sma5_latest = float(latest["SMA_5"]) if not pd.isna(latest["SMA_5"]) else None
-sma20_latest = float(latest["SMA_20"]) if not pd.isna(latest["SMA_20"]) else None
+# Moyennes Mobiles (SMA)
+df["SMA_5"] = df["Close"].rolling(5).mean()
+df["SMA_20"] = df["Close"].rolling(20).mean()
 
-score, label, rating = score_from_indicators(latest_rsi, sma5_latest, sma20_latest)
+# Bollinger Bands (Correction des .squeeze() / .std() pour éviter ValueError)
+rolling_std = df["Close"].rolling(20).std().squeeze()
+if isinstance(rolling_std, pd.DataFrame):
+    rolling_std = rolling_std.iloc[:, 0]
+df["BB_upper"] = df["SMA_20"] + 2 * rolling_std
+df["BB_lower"] = df["SMA_20"] - 2 * rolling_std
 
-# ---------- Layout ----------
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.subheader(f"{selected} — {ticker}")
-    st.write(f"Dernière date : {df.index[-1].date()}")
+# RSI 14 
+delta = df["Close"].diff()
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+avg_gain = gain.ewm(span=14, adjust=False).mean()
+avg_loss = loss.ewm(span=14, adjust=False).mean()
+rs = avg_gain / avg_loss
+df["RSI_14"] = 100 - (100 / (1 + rs))
 
-    # Candlestick + SMA overlays
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-        name="Prix"
-    ))
-    fig.add_trace(go.Scatter(x=df.index, y=df["SMA_5"], name="SMA 5", line=dict(width=1)))
-    fig.add_trace(go.Scatter(x=df.index, y=df["SMA_20"], name="SMA 20", line=dict(width=1)))
-    fig.update_layout(height=600, margin=dict(l=10, r=10, t=30, b=10))
-    st.plotly_chart(fig, use_container_width=True)
+# MACD
+df["EMA_12"] = df["Close"].ewm(span=12, adjust=False).mean()
+df["EMA_26"] = df["Close"].ewm(span=26, adjust=False).mean()
+df["MACD"] = df["EMA_12"] - df["EMA_26"]
+df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-    st.dataframe(df[["Close", "SMA_5", "SMA_20", "RSI_14"]].tail(10))
+# Stochastique (Correction Stoch_K / Stoch_D avec .squeeze() pour éviter ValueError)
+df["L14"] = df["Low"].rolling(14).min().squeeze()  
+df["H14"] = df["High"].rolling(14).max().squeeze() 
+df["Stoch_K"] = 100 * (df["Close"] - df["L14"]) / (df["H14"] - df["L14"]) 
+df["Stoch_D"] = df["Stoch_K"].rolling(3).mean()
+
+# Mouvement Directionnel (ADX)
+df["plus_DM"] = df["High"].diff().clip(lower=0)
+df["minus_DM"] = -df["Low"].diff().clip(upper=0)
+df["TR"] = df[["High", "Low", "Close"]].apply(lambda x: max(x["High"] - x["Low"], abs(x["High"] - x["Close"]), abs(x["Low"] - x["Close"])), axis=1) # True Range
+df["plus_DI"] = 100 * (df["plus_DM"].ewm(alpha=1/14, adjust=False).mean() / df["TR"].ewm(alpha=1/14, adjust=False).mean())
+df["minus_DI"] = 100 * (df["minus_DM"].ewm(alpha=1/14, adjust=False).mean() / df["TR"].ewm(alpha=1/14, adjust=False).mean())
+df["DX"] = 100 * abs(df["plus_DI"] - df["minus_DI"]) / (df["plus_DI"] + df["minus_DI"])
+df["ADX"] = df["DX"].ewm(alpha=1/14, adjust=False).mean()
+
+
+# ---------------------------
+# Fonction d'analyse agrégée (avec gestion des NaN)
+# ---------------------------
+def generate_score_signal(df):
+    
+    # S'assurer d'avoir assez de données pour les calculs (min 30 jours)
+    if df.empty or len(df) < 30: 
+        return 3.0, "Hold", {}, "Données insuffisantes (moins de 30 jours) pour une analyse complète."
+        
+    latest = df.iloc[-1]
+    previous = df.iloc[-2] if len(df) >= 2 else None 
+
+    scores = {}
+    valid_indicator_count = 0
+    
+    # Début des calculs de scores individuels (entourés de vérifications pd.isna)
+    
+    # 1. SMA (5/20)
+    if not pd.isna(latest.get("SMA_5")) and not pd.isna(latest.get("SMA_20")):
+        score_sma = 3
+        if latest["SMA_5"] > latest["SMA_20"]:
+            score_sma = 4 
+            if previous is not None and previous["SMA_5"] < latest["SMA_5"]: score_sma = 5 
+        elif latest["SMA_5"] < latest["SMA_20"]:
+            score_sma = 2
+            if previous is not None and previous["SMA_5"] > latest["SMA_5"]: score_sma = 1 
+        scores["SMA (5/20)"] = score_sma
+        valid_indicator_count += 1
+    
+    # 2. MACD
+    if not pd.isna(latest.get("MACD")) and not pd.isna(latest.get("Signal")):
+        score_macd = 3
+        if latest["MACD"] > latest["Signal"]:
+            score_macd = 4
+            if previous is not None and previous["MACD"] < previous["Signal"]: score_macd = 5 
+        elif latest["MACD"] < latest["Signal"]:
+            score_macd = 2
+            if previous is not None and previous["MACD"] > previous["Signal"]: score_macd = 1 
+        scores["MACD"] = score_macd
+        valid_indicator_count += 1
+    
+    # 3. Bollinger Bands
+    if not pd.isna(latest.get("BB_lower")) and not pd.isna(latest.get("BB_upper")):
+        score_bb = 3
+        if latest["Close"] < latest["BB_lower"]: score_bb = 5 
+        elif latest["Close"] > latest["BB_upper"]: score_bb = 1 
+        scores["Bollinger"] = score_bb
+        valid_indicator_count += 1
+    
+    # 4. RSI 14 
+    if not pd.isna(latest.get("RSI_14")):
+        score_rsi = 3
+        if latest["RSI_14"] < 30: score_rsi = 5
+        elif latest["RSI_14"] > 70: score_rsi = 1
+        scores["RSI"] = score_rsi
+        valid_indicator_count += 1
+    
+    # 5. Stochastique (%K)
+    if not pd.isna(latest.get("Stoch_K")):
+        score_stoch = 3
+        if latest["Stoch_K"] < 20: score_stoch = 5
+        elif latest["Stoch_K"] > 80: score_stoch = 1
+        scores["Stochastique"] = score_stoch
+        valid_indicator_count += 1
+
+    # 6. ADX (Mouvement Directionnel)
+    if not pd.isna(latest.get("ADX")) and not pd.isna(latest.get("plus_DI")):
+        score_adx = 3
+        if latest["ADX"] > 25: 
+            if latest["plus_DI"] > latest["minus_DI"]: score_adx = 4 
+            elif latest["minus_DI"] > latest["plus_DI"]: score_adx = 2 
+        scores["ADX"] = score_adx
+        valid_indicator_count += 1
+    
+    # --- Agrégation Finale ---
+    
+    if valid_indicator_count == 0:
+        return 3.0, "Hold", {}, "Aucun indicateur n'a pu être calculé pour la dernière date."
+
+    final_rating = sum(scores.values()) / valid_indicator_count
+    
+    # Détermination du signal
+    if final_rating > 4.2: final_signal = "Acheter Fort"
+    elif final_rating > 2.8: final_signal = "Acheter"
+    elif final_rating < 1.8: final_signal = "Vendre Fort"
+    elif final_rating < 2.25: final_signal = "Vendre"
+    else: final_signal = "Hold"
+        
+    return final_rating, final_signal, scores, ""
+
+# ----------------------------------------------------
+# Layout : Graphe Classique (en haut) + Colonnes (Graphe Technique / Note)
+# ----------------------------------------------------
+
+# --- 1. Graphe Classique (Toujours en haut) ---
+st.subheader(f"📈 {selected_company} — Graphique classique (Prix de Clôture)")
+fig_classique = go.Figure()
+fig_classique.add_trace(go.Scatter(
+    x=df["Date"], y=df["Close"], mode="lines", name="Prix Close", line=dict(color="blue")
+))
+st.plotly_chart(fig_classique, use_container_width=True, key=f"classique_{selected_company}")
+
+st.markdown("---") 
+
+# --- 2. Colonnes pour Technique et Note ---
+col1, col2 = st.columns([3, 1]) 
+
+# Appel de la fonction d'analyse agrégée
+final_rating, final_signal, individual_scores, status_message = generate_score_signal(df)
 
 with col2:
-    st.markdown("### Indicateurs")
-    st.metric("RSI(14)", f"{latest_rsi:.2f}" if latest_rsi is not None else "N/A")
-    st.metric("SMA5", f"{sma5_latest:.2f}" if sma5_latest is not None else "N/A")
-    st.metric("SMA20", f"{sma20_latest:.2f}" if sma20_latest is not None else "N/A")
-    st.markdown("---")
-    #st.markdown("### Note finale (score)")
-    if score is None:
-        st.info("Pas assez de données pour calculer la note.")
+    st.subheader("Analyse Synthétique")
+
+    # Message d'état (en cas de données insuffisantes)
+    if status_message:
+        st.info(status_message)
     else:
-        # affichage clair de la note, du label et de la note sur 5
-        # st.subheader(f"Score: {score:.1f} / 100")
-        st.metric("Note (sur 5)", f"{rating:.2f} / 5")
-        # affichage étoilé simple
-        try:
-            full_stars = int(round(rating))
-            stars = "★" * full_stars + "☆" * (5 - full_stars)
-        except Exception:
-            stars = "N/A"
-        st.write(f"Interprétation: **{label}**  ")
-        st.write(f"Note visuelle: {stars}")
-
-        if score >= 40:
-            st.success(f"{label} — Recommandation: ACHETER")
-        elif score >= 10:
-            st.success(f"{label} — Recommandation: ACHETER (suivre)")
-        elif score > -10:
-            st.info(f"{label} — Recommandation: NE RIEN FAIRE (HOLD)")
-        elif score >= -39:
-            st.error(f"{label} — Recommandation: VENDRE")
+        # Note Finale
+        st.metric("Note Technique Finale / 5", f"{final_rating:.2f}")
+        full_stars = int(round(final_rating))
+        st.write("Note visuelle:", "★" * full_stars + "☆" * (5 - full_stars))
+        
+        st.markdown("---")
+        
+        # Signal Final
+        if "Fort" in final_signal:
+             if "Acheter" in final_signal:
+                st.success(f"Signal : **{final_signal}** 🚀")
+             else:
+                st.error(f"Signal : **{final_signal}** 🔻")
+        elif final_signal == "Acheter":
+            st.success(f"Signal : **{final_signal}**")
+        elif final_signal == "Vendre":
+            st.error(f"Signal : **{final_signal}**")
         else:
-            st.error(f"{label} — Recommandation: VENDRE FORTEMENT")
+            st.warning(f"Signal : **{final_signal}**")
 
-    st.markdown("---")
-    st.markdown("### Règles utilisées pour la note:")
-    st.markdown("""
-    - **RSI**  
-    - < 30 → +50  
-    - 30–50 → +20  
-    - 50–70 → 0  
-    - > 70 → -50  
+        st.markdown("---")
+        st.caption("Détail des scores (5=Achat Fort, 1=Vente Forte) :")
+        # Afficher le détail des scores individuels
+        for indicator, score in individual_scores.items():
+            color = 'green' if score >= 4 else ('red' if score <= 2 else 'orange')
+            st.markdown(f"- **{indicator}**: <span style='color:{color};'>{'★' * int(round(score))} ({score:.1f})</span>", unsafe_allow_html=True)
+            
+with col1:
+    # Graphe technique (à gauche)
+    if selected_technique != "Graphe Classique":
+        st.subheader(f"Technique : {selected_technique}")
+        fig_technique = go.Figure()
 
-    - **Tendance (SMA)**  
-    - SMA5 > SMA20 → +30  
-    - SMA5 < SMA20 → -30  
-    """)
+        # Leçon 1 (Tendances) et Leçon 2 (Moyennes Mobiles)
+        if selected_technique in ["Leçon 1 : Les Tendances", "Leçon 2 : Les Moyennes Mobiles"]:
+            fig_technique.add_trace(go.Candlestick(x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Prix"))
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["SMA_5"], name="SMA 5", line=dict(color="blue")))
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["SMA_20"], name="SMA 20", line=dict(color="orange")))
+
+        elif selected_technique == "Leçon 3 : La MACD":
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["MACD"], name="MACD"))
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["Signal"], name="Signal"))
+            
+        elif selected_technique == "Leçon 4 : Les Bollingers":
+            fig_technique.add_trace(go.Candlestick(x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Prix"))
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["BB_upper"], name="BB Upper", line=dict(color="red")))
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["BB_lower"], name="BB Lower", line=dict(color="green")))
+
+        elif selected_technique == "Leçon 5 : Le Stochastique":
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["Stoch_K"], name="%K"))
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["Stoch_D"], name="%D"))
+            fig_technique.add_hline(y=80, line_dash="dash", annotation_text="Overbought")
+            fig_technique.add_hline(y=20, line_dash="dash", annotation_text="Oversold")
+
+        # Leçon 6 (Chandeliers)
+        elif selected_technique == "Leçon 6 : Les Chandeliers":
+            fig_technique.add_trace(go.Candlestick(x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Bougies"))
+
+        elif selected_technique == "Leçon 7 : Le RSI":
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["RSI_14"], name="RSI 14"))
+            fig_technique.add_hline(y=70, line_dash="dash", annotation_text="Overbought")
+            fig_technique.add_hline(y=30, line_dash="dash", annotation_text="Oversold")
+
+        elif selected_technique == "Leçon 8 : Le Mouvement Directionnel":
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["plus_DI"], name="+DI"))
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["minus_DI"], name="-DI"))
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["ADX"], name="ADX"))
+        
+        elif selected_technique in ["Leçon 9 : Les Volumes"]:
+            fig_technique.add_trace(go.Bar(x=df["Date"], y=df["Volume"], name="Volume"))
+            
+        # Leçon 14 (Épaule-Tête-Épaule)
+        elif selected_technique == "Leçon 14 : L'épaule-tête-épaule":
+             fig_technique.add_trace(go.Candlestick(x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Bougies"))
+             st.info("Détection visuelle du pattern Épaule-Tête-Épaule non automatisée dans ce script.")
 
 
-# RSI chart
-st.subheader("RSI (14)")
-fig2 = go.Figure()
-fig2.add_trace(go.Scatter(x=df.index, y=df["RSI_14"], name="RSI 14"))
-fig2.add_hline(y=70, line_dash="dash", annotation_text="Overbought 70", annotation_position="top left")
-fig2.add_hline(y=30, line_dash="dash", annotation_text="Oversold 30", annotation_position="bottom left")
-fig2.update_layout(height=250, margin=dict(l=10, r=10, t=10, b=10))
-st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig_technique, use_container_width=True,
+                        key=f"technique_{selected_technique}_{selected_company}")
+        
+    st.dataframe(df.tail(10)) 
 
-# Footer: option d'export JSON
-st.markdown("---")
-if st.button("Exporter les données affichées en JSON"):
-    export_payload = {
-        "entreprise": selected,
-        "ticker": ticker,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "score": score,
-        "label": label,
-        "rating_5": rating,
-        "data": df.reset_index().to_dict(orient="records")
-    }
-    outname = f"{selected}_export.json"
-    with open(outname, "w", encoding="utf-8") as f:
-        json.dump(export_payload, f, ensure_ascii=False, indent=4, default=str)
-    st.success(f"Fichier exporté : {outname}")
-
-st.write("NB: Ceci est un outil pédagogique. Ne prend pas de décisions financières sans conseil adapté.")
+st.write("⚠️ Ceci est un outil pédagogique. Ne prend pas de décisions financières sans conseil adapté.")
