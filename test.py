@@ -3,6 +3,9 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import numpy as np 
+import feedparser 
+import re 
+import urllib.parse # <-- CORRECTION : Import pour l'encodage d'URL
 
 st.set_page_config(layout="wide", page_title="Dashboard d'Analyse Technique")
 st.title("📊 Dashboard d'Analyse Technique")
@@ -38,29 +41,23 @@ selected_technique = st.selectbox("Choisir une technique", techniques)
 # Télécharger les données
 # ---------------------------
 ticker = companies[selected_company]
-# Utilisation de 1 an de données journalières
 df = yf.download(ticker, period="1y", interval="1d", auto_adjust=True) 
 df.reset_index(inplace=True)
-
-# Ligne de sécurité pour éviter les problèmes de MultiIndex (au cas où)
 df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns] 
 
 # ---------------------------
 # Calculs techniques
 # ---------------------------
 
-# Moyennes Mobiles (SMA)
 df["SMA_5"] = df["Close"].rolling(5).mean()
 df["SMA_20"] = df["Close"].rolling(20).mean()
 
-# Bollinger Bands (Correction des .squeeze() / .std() pour éviter ValueError)
 rolling_std = df["Close"].rolling(20).std().squeeze()
 if isinstance(rolling_std, pd.DataFrame):
     rolling_std = rolling_std.iloc[:, 0]
 df["BB_upper"] = df["SMA_20"] + 2 * rolling_std
 df["BB_lower"] = df["SMA_20"] - 2 * rolling_std
 
-# RSI 14 
 delta = df["Close"].diff()
 gain = delta.clip(lower=0)
 loss = -delta.clip(upper=0)
@@ -69,22 +66,19 @@ avg_loss = loss.ewm(span=14, adjust=False).mean()
 rs = avg_gain / avg_loss
 df["RSI_14"] = 100 - (100 / (1 + rs))
 
-# MACD
 df["EMA_12"] = df["Close"].ewm(span=12, adjust=False).mean()
 df["EMA_26"] = df["Close"].ewm(span=26, adjust=False).mean()
 df["MACD"] = df["EMA_12"] - df["EMA_26"]
 df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-# Stochastique (Correction Stoch_K / Stoch_D avec .squeeze() pour éviter ValueError)
 df["L14"] = df["Low"].rolling(14).min().squeeze()  
 df["H14"] = df["High"].rolling(14).max().squeeze() 
 df["Stoch_K"] = 100 * (df["Close"] - df["L14"]) / (df["H14"] - df["L14"]) 
 df["Stoch_D"] = df["Stoch_K"].rolling(3).mean()
 
-# Mouvement Directionnel (ADX)
 df["plus_DM"] = df["High"].diff().clip(lower=0)
 df["minus_DM"] = -df["Low"].diff().clip(upper=0)
-df["TR"] = df[["High", "Low", "Close"]].apply(lambda x: max(x["High"] - x["Low"], abs(x["High"] - x["Close"]), abs(x["Low"] - x["Close"])), axis=1) # True Range
+df["TR"] = df[["High", "Low", "Close"]].apply(lambda x: max(x["High"] - x["Low"], abs(x["High"] - x["Close"]), abs(x["Low"] - x["Close"])), axis=1)
 df["plus_DI"] = 100 * (df["plus_DM"].ewm(alpha=1/14, adjust=False).mean() / df["TR"].ewm(alpha=1/14, adjust=False).mean())
 df["minus_DI"] = 100 * (df["minus_DM"].ewm(alpha=1/14, adjust=False).mean() / df["TR"].ewm(alpha=1/14, adjust=False).mean())
 df["DX"] = 100 * abs(df["plus_DI"] - df["minus_DI"]) / (df["plus_DI"] + df["minus_DI"])
@@ -92,21 +86,67 @@ df["ADX"] = df["DX"].ewm(alpha=1/14, adjust=False).mean()
 
 
 # ---------------------------
-# Fonction d'analyse agrégée (avec gestion des NaN)
+# FONCTION : Analyse d'Actualités (CORRIGÉE)
 # ---------------------------
-def generate_score_signal(df):
+@st.cache_data(ttl=3600)
+def get_news_score(company_name):
+    # Construction et encodage de la requête pour éviter InvalidURL
+    search_query = f"{company_name} actions"
+    encoded_query = urllib.parse.quote(search_query) # <-- CORRECTION APPLIQUÉE
+    rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=fr&gl=FR&ceid=FR:fr"
     
-    # S'assurer d'avoir assez de données pour les calculs (min 30 jours)
+    try:
+        feed = feedparser.parse(rss_url)
+    except Exception as e:
+        st.error(f"Erreur lors de la récupération du flux RSS : {e}")
+        return 3.0, "Erreur de connexion au flux RSS."
+    
+    total_articles = len(feed.entries)
+    
+    if total_articles == 0:
+        return 3.0, "Aucune actualité récente trouvée."
+
+    positive_keywords = r'gagne|hausse|progresse|record|succès|croissance|achat|augmentation|fort|solide'
+    negative_keywords = r'perd|chute|baisse|déclin|difficulté|vendre|crise|scandale|recul|procès|pénurie'
+
+    score_sum = 0
+    article_count = 0
+
+    for entry in feed.entries:
+        title = entry.title.lower()
+        article_score = 3.0
+        
+        pos_count = len(re.findall(positive_keywords, title))
+        neg_count = len(re.findall(negative_keywords, title))
+
+        if pos_count > neg_count:
+            article_score = 5.0
+        elif neg_count > pos_count:
+            article_score = 1.0
+        
+        score_sum += article_score
+        article_count += 1
+        
+    if article_count > 0:
+        news_rating = score_sum / article_count
+        return news_rating, f"{article_count} articles analysés."
+    else:
+        return 3.0, "Aucune actualité pertinente analysée."
+
+
+# ---------------------------
+# Fonction d'analyse agrégée
+# ---------------------------
+def generate_score_signal(df, company_name):
+    
     if df.empty or len(df) < 30: 
-        return 3.0, "Hold", {}, "Données insuffisantes (moins de 30 jours) pour une analyse complète."
+        return 3.0, "Hold", {}, "Données historiques insuffisantes (moins de 30 jours)."
         
     latest = df.iloc[-1]
     previous = df.iloc[-2] if len(df) >= 2 else None 
 
     scores = {}
     valid_indicator_count = 0
-    
-    # Début des calculs de scores individuels (entourés de vérifications pd.isna)
     
     # 1. SMA (5/20)
     if not pd.isna(latest.get("SMA_5")) and not pd.isna(latest.get("SMA_20")):
@@ -165,6 +205,11 @@ def generate_score_signal(df):
         scores["ADX"] = score_adx
         valid_indicator_count += 1
     
+    # 7. SCORE ACTUS (Actualités)
+    news_score, news_status = get_news_score(company_name)
+    scores["Actualités (Fund.)"] = news_score
+    valid_indicator_count += 1 
+
     # --- Agrégation Finale ---
     
     if valid_indicator_count == 0:
@@ -174,16 +219,20 @@ def generate_score_signal(df):
     
     # Détermination du signal
     if final_rating > 4.2: final_signal = "Acheter Fort"
-    elif final_rating > 2.8: final_signal = "Acheter"
+    elif final_rating > 2.87: final_signal = "Acheter"
     elif final_rating < 1.8: final_signal = "Vendre Fort"
     elif final_rating < 2.25: final_signal = "Vendre"
     else: final_signal = "Hold"
         
-    return final_rating, final_signal, scores, ""
+    return final_rating, final_signal, scores, news_status
+
 
 # ----------------------------------------------------
 # Layout : Graphe Classique (en haut) + Colonnes (Graphe Technique / Note)
 # ----------------------------------------------------
+
+# Appel de la fonction d'analyse agrégée
+final_rating, final_signal, individual_scores, news_status = generate_score_signal(df, selected_company)
 
 # --- 1. Graphe Classique (Toujours en haut) ---
 st.subheader(f"📈 {selected_company} — Graphique classique (Prix de Clôture)")
@@ -198,40 +247,37 @@ st.markdown("---")
 # --- 2. Colonnes pour Technique et Note ---
 col1, col2 = st.columns([3, 1]) 
 
-# Appel de la fonction d'analyse agrégée
-final_rating, final_signal, individual_scores, status_message = generate_score_signal(df)
-
 with col2:
     st.subheader("Analyse Synthétique")
 
-    # Message d'état (en cas de données insuffisantes)
-    if status_message:
-        st.info(status_message)
+    # Note Finale
+    st.metric("Note Technique Finale / 5", f"{final_rating:.2f}")
+    full_stars = int(round(final_rating))
+    st.write("Note visuelle:", "★" * full_stars + "☆" * (5 - full_stars))
+    
+    st.markdown("---")
+    
+    # Signal Final
+    if "Fort" in final_signal:
+         if "Acheter" in final_signal:
+            st.success(f"Signal : **{final_signal}** 🚀")
+         else:
+            st.error(f"Signal : **{final_signal}** 🔻")
+    elif final_signal == "Acheter":
+        st.success(f"Signal : **{final_signal}**")
+    elif final_signal == "Vendre":
+        st.error(f"Signal : **{final_signal}**")
     else:
-        # Note Finale
-        st.metric("Note Technique Finale / 5", f"{final_rating:.2f}")
-        full_stars = int(round(final_rating))
-        st.write("Note visuelle:", "★" * full_stars + "☆" * (5 - full_stars))
-        
-        st.markdown("---")
-        
-        # Signal Final
-        if "Fort" in final_signal:
-             if "Acheter" in final_signal:
-                st.success(f"Signal : **{final_signal}** 🚀")
-             else:
-                st.error(f"Signal : **{final_signal}** 🔻")
-        elif final_signal == "Acheter":
-            st.success(f"Signal : **{final_signal}**")
-        elif final_signal == "Vendre":
-            st.error(f"Signal : **{final_signal}**")
-        else:
-            st.warning(f"Signal : **{final_signal}**")
+        st.warning(f"Signal : **{final_signal}**")
 
-        st.markdown("---")
-        st.caption("Détail des scores (5=Achat Fort, 1=Vente Forte) :")
-        # Afficher le détail des scores individuels
-        for indicator, score in individual_scores.items():
+    st.markdown("---")
+    st.caption("Détail des scores (5=Achat Fort, 1=Vente Forte) :")
+    
+    # Afficher le détail des scores individuels
+    for indicator, score in individual_scores.items():
+        if indicator == "Actualités (Fund.)":
+            st.markdown(f"- **{indicator}**: {'⭐' * int(round(score))} ({score:.1f}) _({news_status})_")
+        else:
             color = 'green' if score >= 4 else ('red' if score <= 2 else 'orange')
             st.markdown(f"- **{indicator}**: <span style='color:{color};'>{'★' * int(round(score))} ({score:.1f})</span>", unsafe_allow_html=True)
             
@@ -262,14 +308,13 @@ with col1:
             fig_technique.add_hline(y=80, line_dash="dash", annotation_text="Overbought")
             fig_technique.add_hline(y=20, line_dash="dash", annotation_text="Oversold")
 
-        # Leçon 6 (Chandeliers)
         elif selected_technique == "Leçon 6 : Les Chandeliers":
             fig_technique.add_trace(go.Candlestick(x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Bougies"))
 
         elif selected_technique == "Leçon 7 : Le RSI":
             fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["RSI_14"], name="RSI 14"))
-            fig_technique.add_hline(y=70, line_dash="dash", annotation_text="Overbought")
-            fig_technique.add_hline(y=30, line_dash="dash", annotation_text="Oversold")
+            fig_technique.add_hline(y=70, line_dash="dash", annotation_text="Overbought", line=dict(color="red"))
+            fig_technique.add_hline(y=30, line_dash="dash", annotation_text="Oversold", line=dict(color="green"))
 
         elif selected_technique == "Leçon 8 : Le Mouvement Directionnel":
             fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["plus_DI"], name="+DI"))
@@ -279,7 +324,6 @@ with col1:
         elif selected_technique in ["Leçon 9 : Les Volumes"]:
             fig_technique.add_trace(go.Bar(x=df["Date"], y=df["Volume"], name="Volume"))
             
-        # Leçon 14 (Épaule-Tête-Épaule)
         elif selected_technique == "Leçon 14 : L'épaule-tête-épaule":
              fig_technique.add_trace(go.Candlestick(x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Bougies"))
              st.info("Détection visuelle du pattern Épaule-Tête-Épaule non automatisée dans ce script.")
