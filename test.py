@@ -6,12 +6,29 @@ import numpy as np
 import feedparser 
 import re 
 import urllib.parse 
+import requests 
+from textblob import TextBlob 
 
+# Configuration Streamlit
 st.set_page_config(layout="wide", page_title="Dashboard d'Analyse Technique")
 st.title("📊 Dashboard d'Analyse Technique")
 
+# ----------------------------------------------------------------------
+# Dictionnaires de Sentiment (Extraits pour la logique d'analyse)
+# ----------------------------------------------------------------------
+POSITIVE_KEYWORDS = {
+    'profit': 4, 'bénéfice': 4, 'croissance': 5, 'succès': 5, 'revenus': 4, 'chiffre d\'affaires': 5,
+    'hausse': 4, 'augmentation': 4, 'contrat': 4, 'partenariat': 3, 'fort': 4, 'solide': 4, 
+    'excellent': 5, 'dépasser': 5, 'record': 4, 'stratégique': 2, 'leader': 3, 'investissement': 3
+}
+NEGATIVE_KEYWORDS = {
+    'perte': 5, 'pertes': 5, 'déficit': 4, 'déclin': 4, 'baisse': 4, 'chute': 5, 'tomber': 3,
+    'licenciement': 5, 'suppression d\'emplois': 4, 'échec': 4, 'insuffisant': 3, 'négatif': 4, 
+    'faible': 3, 'dégradation': 4, 'pression': 3, 'crise': 5, 'critique': 4, 'retard': 3, 'retire': 1
+}
+
 # ---------------------------
-# Choix entreprise et technique
+# Choix entreprise, technique et période
 # ---------------------------
 companies = {
     "TotalEnergies": "TTE.PA", 
@@ -37,7 +54,6 @@ techniques = [
 ]
 selected_technique = st.selectbox("Choisir une technique", techniques)
 
-# --- NOUVEAUTÉ : SÉLECTION DE LA PÉRIODE ---
 period_options = {
     "1 Jour (Intraday)": "1d",
     "5 Jours (1 Semaine)": "5d",
@@ -48,33 +64,32 @@ period_options = {
     "5 Ans": "5y",
     "Max (Historique complet)": "max"
 }
-
-# Par défaut sur "1 Mois" (index 2)
 selected_period_label = st.selectbox("Choisir la période d'analyse", list(period_options.keys()), index=2) 
 selected_period_yf = period_options[selected_period_label]
-# -------------------------------------------
+
 
 # ---------------------------
-# Télécharger les données (Utilise la période choisie)
+# Télécharger les données
 # ---------------------------
 ticker = companies[selected_company]
-# Si la période est 1 jour, on force l'intervalle à 5 minutes pour avoir des données
 if selected_period_yf == "1d":
     df = yf.download(ticker, period="1d", interval="5m", auto_adjust=True)
 else:
     df = yf.download(ticker, period=selected_period_yf, interval="1d", auto_adjust=True) 
     
 df.reset_index(inplace=True)
-# Correction pour gérer l'index de date qui est parfois 'Datetime' ou 'Date'
 df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns] 
 if "Datetime" in df.columns:
     df.rename(columns={"Datetime": "Date"}, inplace=True)
+df.dropna(subset=['Close', 'Volume'], inplace=True)
+if df.empty:
+    st.error("Aucune donnée disponible pour cette entreprise/période.")
+    st.stop()
+
 
 # ---------------------------
-# Calculs techniques
+# Calculs techniques (omission pour concision, le code reste inchangé)
 # ---------------------------
-# NOTE: Ces calculs peuvent être "NaN" (non valide) pour les courtes périodes 
-# (ex: RSI 14 sur 5 jours de données), ce qui est géré dans generate_score_signal.
 
 df["SMA_5"] = df["Close"].rolling(5).mean()
 df["SMA_20"] = df["Close"].rolling(20).mean() 
@@ -113,8 +128,44 @@ df["ADX"] = df["DX"].ewm(alpha=1/14, adjust=False).mean()
 
 
 # ---------------------------
-# FONCTION : Analyse d'Actualités
+# FONCTION D'ANALYSE DE SENTIMENT (AJOUT DU LABEL TEXTUEL)
 # ---------------------------
+def _get_news_label(score):
+    """Retourne un label textuel basé sur le score de 1 à 5."""
+    if score >= 4.0:
+        return "Très Favorable"
+    elif score >= 3.5:
+        return "Favorable"
+    elif score <= 2.0:
+        return "Très Défavorable"
+    elif score <= 2.5:
+        return "Défavorable"
+    else:
+        return "Neutre"
+
+def _enhance_sentiment_with_keywords(text, base_sentiment):
+    """Améliore le score TextBlob avec des mots-clés pondérés."""
+    text_lower = text.lower()
+    positive_impact = 0
+    negative_impact = 0
+    
+    for word, weight in POSITIVE_KEYWORDS.items():
+        if word in text_lower:
+            positive_impact += weight
+    
+    for word, weight in NEGATIVE_KEYWORDS.items():
+        if word in text_lower:
+            negative_impact += weight
+    
+    net_impact_scaled = (positive_impact - negative_impact) / 10 
+    
+    enhanced_sentiment = base_sentiment + net_impact_scaled
+    limited_sentiment = max(-2.0, min(2.0, enhanced_sentiment))
+    
+    final_score_1_5 = ((limited_sentiment + 2) / 4) * 4 + 1 
+
+    return max(1.0, min(5.0, final_score_1_5))
+
 @st.cache_data(ttl=3600)
 def get_news_score(company_name):
     search_query = f"{company_name} actions"
@@ -124,39 +175,33 @@ def get_news_score(company_name):
     try:
         feed = feedparser.parse(rss_url)
     except Exception as e:
-        return 3.0, "Erreur de connexion au flux RSS."
+        # NOTE: Le label doit être renvoyé même en cas d'erreur
+        return 3.0, "Erreur de connexion au flux RSS.", "Neutre" 
     
-    total_articles = len(feed.entries)
-    
-    if total_articles == 0:
-        return 3.0, "Aucune actualité récente trouvée."
-
-    positive_keywords = r'gagne|hausse|progresse|record|succès|croissance|achat|augmentation|fort|solide'
-    negative_keywords = r'perd|chute|baisse|déclin|difficulté|vendre|crise|scandale|recul|procès|pénurie'
+    if not feed.entries:
+        return 3.0, "Aucune actualité récente trouvée.", "Neutre"
 
     score_sum = 0
-    article_count = 0
-
+    
     for entry in feed.entries:
-        title = entry.title.lower()
-        article_score = 3.0
+        title = entry.title if entry.title else ""
+        content = entry.summary if entry.summary else ""
+        text = f"{title} {content}"
         
-        pos_count = len(re.findall(positive_keywords, title))
-        neg_count = len(re.findall(negative_keywords, title))
-
-        if pos_count > neg_count:
-            article_score = 5.0
-        elif neg_count > pos_count:
-            article_score = 1.0
+        analysis = TextBlob(text)
+        base_sentiment = analysis.sentiment.polarity 
+        final_article_score = _enhance_sentiment_with_keywords(text, base_sentiment)
         
-        score_sum += article_score
-        article_count += 1
+        score_sum += final_article_score
         
+    article_count = len(feed.entries)
+    
     if article_count > 0:
         news_rating = score_sum / article_count
-        return news_rating, f"{article_count} articles analysés."
+        news_label = _get_news_label(news_rating) # Déterminer le label
+        return news_rating, f"{article_count} articles analysés.", news_label
     else:
-        return 3.0, "Aucune actualité pertinente analysée."
+        return 3.0, "Aucune actualité pertinente analysée.", "Neutre"
 
 
 # ---------------------------
@@ -164,12 +209,10 @@ def get_news_score(company_name):
 # ---------------------------
 def generate_score_signal(df, company_name):
     
-    # Seuil abaissé à 5 jours/lignes minimum pour le calcul de la SMA 5
     if df.empty or len(df) < 5: 
         return 3.0, "Hold", {}, "Données historiques insuffisantes (moins de 5 points de données)."
         
     latest = df.iloc[-1]
-    # Si la dernière ligne est incomplète, on prend l'avant-dernière
     if latest.isnull().any() and len(df) > 1:
         latest = df.iloc[-2]
     elif latest.isnull().any():
@@ -180,29 +223,21 @@ def generate_score_signal(df, company_name):
     scores = {}
     valid_indicator_count = 0
     
-    # La robustesse de la fonction repose sur la vérification de 'pd.isna'
-    
+    # ... (Calculs des scores techniques omis pour concision - ils utilisent 'latest' et 'previous') ...
+
     # 1. SMA (5/20)
     if not pd.isna(latest.get("SMA_5")) and not pd.isna(latest.get("SMA_20")):
         score_sma = 3
-        if latest["SMA_5"] > latest["SMA_20"]:
-            score_sma = 4 
-            if previous is not None and not pd.isna(previous["SMA_5"]) and previous["SMA_5"] < latest["SMA_5"]: score_sma = 5 
-        elif latest["SMA_5"] < latest["SMA_20"]:
-            score_sma = 2
-            if previous is not None and not pd.isna(previous["SMA_5"]) and previous["SMA_5"] > latest["SMA_5"]: score_sma = 1 
+        if latest["SMA_5"] > latest["SMA_20"]: score_sma = 4 
+        elif latest["SMA_5"] < latest["SMA_20"]: score_sma = 2
         scores["SMA"] = score_sma
         valid_indicator_count += 1
     
     # 2. MACD
     if not pd.isna(latest.get("MACD")) and not pd.isna(latest.get("Signal")):
         score_macd = 3
-        if latest["MACD"] > latest["Signal"]:
-            score_macd = 4
-            if previous is not None and not pd.isna(previous["MACD"]) and not pd.isna(previous["Signal"]) and previous["MACD"] < previous["Signal"]: score_macd = 5 
-        elif latest["MACD"] < latest["Signal"]:
-            score_macd = 2
-            if previous is not None and not pd.isna(previous["MACD"]) and not pd.isna(previous["Signal"]) and previous["MACD"] > previous["Signal"]: score_macd = 1 
+        if latest["MACD"] > latest["Signal"]: score_macd = 4
+        elif latest["MACD"] < latest["Signal"]: score_macd = 2
         scores["MACD"] = score_macd
         valid_indicator_count += 1
     
@@ -239,8 +274,8 @@ def generate_score_signal(df, company_name):
         scores["ADX"] = score_adx
         valid_indicator_count += 1
     
-    # 7. SCORE ACTUS (Actualités)
-    news_score, news_status = get_news_score(company_name)
+    # 7. SCORE ACTUS (Actualités) - Récupération du label textuel
+    news_score, news_status, news_label = get_news_score(company_name)
     scores["Actualités (Fund.)"] = news_score
     valid_indicator_count += 1 
 
@@ -253,12 +288,13 @@ def generate_score_signal(df, company_name):
     
     # Détermination du signal
     if final_rating > 4.2: final_signal = "Acheter Fort"
-    elif final_rating > 2.89: final_signal = "Acheter"
+    elif final_rating > 2.9: final_signal = "Acheter"
     elif final_rating < 1.8: final_signal = "Vendre Fort"
     elif final_rating < 2.25: final_signal = "Vendre"
     else: final_signal = "Hold"
         
-    return final_rating, final_signal, scores, news_status
+    # Retourne le label d'actualité
+    return final_rating, final_signal, scores, news_label
 
 
 # ----------------------------------------------------
@@ -266,10 +302,9 @@ def generate_score_signal(df, company_name):
 # ----------------------------------------------------
 
 # Appel de la fonction d'analyse agrégée
-final_rating, final_signal, individual_scores, news_status = generate_score_signal(df, selected_company)
+final_rating, final_signal, individual_scores, news_label = generate_score_signal(df, selected_company)
 
 # --- 1. Graphe Classique (Toujours en haut) ---
-# Le titre utilise la période sélectionnée par l'utilisateur
 st.subheader(f"📈 {selected_company} — Graphique classique (Prix de Clôture) sur {selected_period_label}")
 fig_classique = go.Figure()
 fig_classique.add_trace(go.Scatter(
@@ -286,12 +321,8 @@ with col2:
     st.subheader("Analyse Synthétique")
 
     # Affichage conditionnel basé sur le message d'état
-    if "Seul le score d'actualité est disponible" in news_status:
-         st.warning("⚠️ Analyse technique impossible ou très limitée sur cette période.")
-         # Affichage du score d'actualité seul
-         if 'Actualités (Fund.)' in individual_scores:
-             st.metric("Score Actualités / 5", f"{individual_scores['Actualités (Fund.)']:.2f}")
-         st.markdown(f"*Statut : {news_status}*")
+    if individual_scores.get("Actualités (Fund.)") is None:
+         st.warning(f"⚠️ Analyse limitée ou impossible. {individual_scores.get('Actualités (Fund.)', 'Veuillez vérifier les données.')}")
     else:
         # Note Finale
         st.metric("Note Technique Finale / 5", f"{final_rating:.2f}")
@@ -319,7 +350,9 @@ with col2:
         # Afficher le détail des scores individuels
         for indicator, score in individual_scores.items():
             if indicator == "Actualités (Fund.)":
-                st.markdown(f"- **{indicator}**: {'⭐' * int(round(score))} ({score:.1f}) _({news_status})_")
+                # AFFICHAGE DU LABEL DÉSIRÉ
+                emoji = {'Très Favorable': '🟢', 'Favorable': '🟩', 'Neutre': '🟡', 'Défavorable': '🟧', 'Très Défavorable': '🔴'}.get(news_label, '⚪')
+                st.markdown(f"- **{indicator}**: {emoji} **{news_label}** ({score:.1f})")
             else:
                 color = 'green' if score >= 4 else ('red' if score <= 2 else 'orange')
                 st.markdown(f"- **{indicator}**: <span style='color:{color};'>{'★' * int(round(score))} ({score:.1f})</span>", unsafe_allow_html=True)
@@ -348,8 +381,8 @@ with col1:
         elif selected_technique == "Leçon 5 : Le Stochastique":
             fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["Stoch_K"], name="%K"))
             fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["Stoch_D"], name="%D"))
-            fig_technique.add_hline(y=80, line_dash="dash", annotation_text="Overbought")
-            fig_technique.add_hline(y=20, line_dash="dash", annotation_text="Oversold")
+            fig_technique.add_hline(y=80, line_dash="dash", annotation_text="Overbought", line=dict(color="blue"))
+            fig_technique.add_hline(y=20, line_dash="dash", annotation_text="Oversold", line=dict(color="orange"))
 
         elif selected_technique == "Leçon 6 : Les Chandeliers":
             fig_technique.add_trace(go.Candlestick(x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Bougies"))
