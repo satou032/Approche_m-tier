@@ -37,20 +37,47 @@ techniques = [
 ]
 selected_technique = st.selectbox("Choisir une technique", techniques)
 
+# --- NOUVEAUTÉ : SÉLECTION DE LA PÉRIODE ---
+period_options = {
+    "1 Jour (Intraday)": "1d",
+    "5 Jours (1 Semaine)": "5d",
+    "1 Mois": "1mo",
+    "3 Mois": "3mo",
+    "6 Mois": "6mo",
+    "1 An": "1y",
+    "5 Ans": "5y",
+    "Max (Historique complet)": "max"
+}
+
+# Par défaut sur "1 Mois" (index 2)
+selected_period_label = st.selectbox("Choisir la période d'analyse", list(period_options.keys()), index=2) 
+selected_period_yf = period_options[selected_period_label]
+# -------------------------------------------
+
 # ---------------------------
-# Télécharger les données (période 1 mois conservée)
+# Télécharger les données (Utilise la période choisie)
 # ---------------------------
 ticker = companies[selected_company]
-df = yf.download(ticker, period="1mo", interval="1d", auto_adjust=True) 
+# Si la période est 1 jour, on force l'intervalle à 5 minutes pour avoir des données
+if selected_period_yf == "1d":
+    df = yf.download(ticker, period="1d", interval="5m", auto_adjust=True)
+else:
+    df = yf.download(ticker, period=selected_period_yf, interval="1d", auto_adjust=True) 
+    
 df.reset_index(inplace=True)
+# Correction pour gérer l'index de date qui est parfois 'Datetime' ou 'Date'
 df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns] 
+if "Datetime" in df.columns:
+    df.rename(columns={"Datetime": "Date"}, inplace=True)
 
 # ---------------------------
 # Calculs techniques
 # ---------------------------
+# NOTE: Ces calculs peuvent être "NaN" (non valide) pour les courtes périodes 
+# (ex: RSI 14 sur 5 jours de données), ce qui est géré dans generate_score_signal.
 
 df["SMA_5"] = df["Close"].rolling(5).mean()
-df["SMA_20"] = df["Close"].rolling(20).mean() # Peut générer NaN au début
+df["SMA_20"] = df["Close"].rolling(20).mean() 
 
 rolling_std = df["Close"].rolling(20).std().squeeze()
 if isinstance(rolling_std, pd.DataFrame):
@@ -97,7 +124,6 @@ def get_news_score(company_name):
     try:
         feed = feedparser.parse(rss_url)
     except Exception as e:
-        # st.error(f"Erreur lors de la récupération du flux RSS : {e}")
         return 3.0, "Erreur de connexion au flux RSS."
     
     total_articles = len(feed.entries)
@@ -134,17 +160,19 @@ def get_news_score(company_name):
 
 
 # ---------------------------
-# Fonction d'analyse agrégée (CORRIGÉE)
+# Fonction d'analyse agrégée
 # ---------------------------
 def generate_score_signal(df, company_name):
     
-    # Nouvelle condition pour le nombre de jours minimum (ex: 20 jours)
-    if df.empty or len(df) < 20: 
-        return 3.0, "Hold", {}, "Données historiques insuffisantes (moins de 20 jours)."
+    # Seuil abaissé à 5 jours/lignes minimum pour le calcul de la SMA 5
+    if df.empty or len(df) < 5: 
+        return 3.0, "Hold", {}, "Données historiques insuffisantes (moins de 5 points de données)."
         
-    # Vérification de la validité de la dernière ligne
     latest = df.iloc[-1]
-    if latest.isnull().any():
+    # Si la dernière ligne est incomplète, on prend l'avant-dernière
+    if latest.isnull().any() and len(df) > 1:
+        latest = df.iloc[-2]
+    elif latest.isnull().any():
          return 3.0, "Hold", {}, "La dernière ligne de données est incomplète (NaN)."
          
     previous = df.iloc[-2] if len(df) >= 2 else None 
@@ -152,8 +180,9 @@ def generate_score_signal(df, company_name):
     scores = {}
     valid_indicator_count = 0
     
+    # La robustesse de la fonction repose sur la vérification de 'pd.isna'
+    
     # 1. SMA (5/20)
-    # Rendre la vérification plus robuste en incluant un test de NaN pour chaque indicateur
     if not pd.isna(latest.get("SMA_5")) and not pd.isna(latest.get("SMA_20")):
         score_sma = 3
         if latest["SMA_5"] > latest["SMA_20"]:
@@ -162,7 +191,7 @@ def generate_score_signal(df, company_name):
         elif latest["SMA_5"] < latest["SMA_20"]:
             score_sma = 2
             if previous is not None and not pd.isna(previous["SMA_5"]) and previous["SMA_5"] > latest["SMA_5"]: score_sma = 1 
-        scores["SMA (5/20)"] = score_sma
+        scores["SMA"] = score_sma
         valid_indicator_count += 1
     
     # 2. MACD
@@ -217,8 +246,8 @@ def generate_score_signal(df, company_name):
 
     # --- Agrégation Finale ---
     
-    if valid_indicator_count <= 1: # Si seul le score d'actualité est valide, on retourne Hold
-        return 3.0, "Hold", {}, "Seul le score d'actualité est disponible (manque données techniques)."
+    if valid_indicator_count <= 1: 
+        return 3.0, "Hold", scores, "Seul le score d'actualité est disponible (manque données techniques)."
 
     final_rating = sum(scores.values()) / valid_indicator_count
     
@@ -240,7 +269,8 @@ def generate_score_signal(df, company_name):
 final_rating, final_signal, individual_scores, news_status = generate_score_signal(df, selected_company)
 
 # --- 1. Graphe Classique (Toujours en haut) ---
-st.subheader(f"📈 {selected_company} — Graphique classique (Prix de Clôture) sur 1 Mois")
+# Le titre utilise la période sélectionnée par l'utilisateur
+st.subheader(f"📈 {selected_company} — Graphique classique (Prix de Clôture) sur {selected_period_label}")
 fig_classique = go.Figure()
 fig_classique.add_trace(go.Scatter(
     x=df["Date"], y=df["Close"], mode="lines", name="Prix Close", line=dict(color="blue")
@@ -256,10 +286,12 @@ with col2:
     st.subheader("Analyse Synthétique")
 
     # Affichage conditionnel basé sur le message d'état
-    if individual_scores.get('Actualités (Fund.)') is None and final_signal == "Hold":
-         # Si le score d'actualité n'a pas été calculé ET que le signal est Hold par défaut
-         st.warning("⚠️ Chargement en cours ou données insuffisantes pour l'analyse technique.")
-         st.markdown(f"*{individual_scores.get('Actualités (Fund.)', 'Veuillez patienter ou vérifier la connexion.')}*") # Affichage du statut
+    if "Seul le score d'actualité est disponible" in news_status:
+         st.warning("⚠️ Analyse technique impossible ou très limitée sur cette période.")
+         # Affichage du score d'actualité seul
+         if 'Actualités (Fund.)' in individual_scores:
+             st.metric("Score Actualités / 5", f"{individual_scores['Actualités (Fund.)']:.2f}")
+         st.markdown(f"*Statut : {news_status}*")
     else:
         # Note Finale
         st.metric("Note Technique Finale / 5", f"{final_rating:.2f}")
