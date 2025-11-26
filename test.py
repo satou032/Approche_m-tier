@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import numpy as np 
 import feedparser 
 import re 
-import urllib.parse # <-- CORRECTION : Import pour l'encodage d'URL
+import urllib.parse 
 
 st.set_page_config(layout="wide", page_title="Dashboard d'Analyse Technique")
 st.title("📊 Dashboard d'Analyse Technique")
@@ -38,10 +38,10 @@ techniques = [
 selected_technique = st.selectbox("Choisir une technique", techniques)
 
 # ---------------------------
-# Télécharger les données
+# Télécharger les données (période 1 mois conservée)
 # ---------------------------
 ticker = companies[selected_company]
-df = yf.download(ticker, period="1y", interval="1d", auto_adjust=True) 
+df = yf.download(ticker, period="1mo", interval="1d", auto_adjust=True) 
 df.reset_index(inplace=True)
 df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns] 
 
@@ -50,7 +50,7 @@ df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
 # ---------------------------
 
 df["SMA_5"] = df["Close"].rolling(5).mean()
-df["SMA_20"] = df["Close"].rolling(20).mean()
+df["SMA_20"] = df["Close"].rolling(20).mean() # Peut générer NaN au début
 
 rolling_std = df["Close"].rolling(20).std().squeeze()
 if isinstance(rolling_std, pd.DataFrame):
@@ -86,19 +86,18 @@ df["ADX"] = df["DX"].ewm(alpha=1/14, adjust=False).mean()
 
 
 # ---------------------------
-# FONCTION : Analyse d'Actualités (CORRIGÉE)
+# FONCTION : Analyse d'Actualités
 # ---------------------------
 @st.cache_data(ttl=3600)
 def get_news_score(company_name):
-    # Construction et encodage de la requête pour éviter InvalidURL
     search_query = f"{company_name} actions"
-    encoded_query = urllib.parse.quote(search_query) # <-- CORRECTION APPLIQUÉE
+    encoded_query = urllib.parse.quote(search_query) 
     rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=fr&gl=FR&ceid=FR:fr"
     
     try:
         feed = feedparser.parse(rss_url)
     except Exception as e:
-        st.error(f"Erreur lors de la récupération du flux RSS : {e}")
+        # st.error(f"Erreur lors de la récupération du flux RSS : {e}")
         return 3.0, "Erreur de connexion au flux RSS."
     
     total_articles = len(feed.entries)
@@ -135,28 +134,34 @@ def get_news_score(company_name):
 
 
 # ---------------------------
-# Fonction d'analyse agrégée
+# Fonction d'analyse agrégée (CORRIGÉE)
 # ---------------------------
 def generate_score_signal(df, company_name):
     
-    if df.empty or len(df) < 30: 
-        return 3.0, "Hold", {}, "Données historiques insuffisantes (moins de 30 jours)."
+    # Nouvelle condition pour le nombre de jours minimum (ex: 20 jours)
+    if df.empty or len(df) < 20: 
+        return 3.0, "Hold", {}, "Données historiques insuffisantes (moins de 20 jours)."
         
+    # Vérification de la validité de la dernière ligne
     latest = df.iloc[-1]
+    if latest.isnull().any():
+         return 3.0, "Hold", {}, "La dernière ligne de données est incomplète (NaN)."
+         
     previous = df.iloc[-2] if len(df) >= 2 else None 
 
     scores = {}
     valid_indicator_count = 0
     
     # 1. SMA (5/20)
+    # Rendre la vérification plus robuste en incluant un test de NaN pour chaque indicateur
     if not pd.isna(latest.get("SMA_5")) and not pd.isna(latest.get("SMA_20")):
         score_sma = 3
         if latest["SMA_5"] > latest["SMA_20"]:
             score_sma = 4 
-            if previous is not None and previous["SMA_5"] < latest["SMA_5"]: score_sma = 5 
+            if previous is not None and not pd.isna(previous["SMA_5"]) and previous["SMA_5"] < latest["SMA_5"]: score_sma = 5 
         elif latest["SMA_5"] < latest["SMA_20"]:
             score_sma = 2
-            if previous is not None and previous["SMA_5"] > latest["SMA_5"]: score_sma = 1 
+            if previous is not None and not pd.isna(previous["SMA_5"]) and previous["SMA_5"] > latest["SMA_5"]: score_sma = 1 
         scores["SMA (5/20)"] = score_sma
         valid_indicator_count += 1
     
@@ -165,10 +170,10 @@ def generate_score_signal(df, company_name):
         score_macd = 3
         if latest["MACD"] > latest["Signal"]:
             score_macd = 4
-            if previous is not None and previous["MACD"] < previous["Signal"]: score_macd = 5 
+            if previous is not None and not pd.isna(previous["MACD"]) and not pd.isna(previous["Signal"]) and previous["MACD"] < previous["Signal"]: score_macd = 5 
         elif latest["MACD"] < latest["Signal"]:
             score_macd = 2
-            if previous is not None and previous["MACD"] > previous["Signal"]: score_macd = 1 
+            if previous is not None and not pd.isna(previous["MACD"]) and not pd.isna(previous["Signal"]) and previous["MACD"] > previous["Signal"]: score_macd = 1 
         scores["MACD"] = score_macd
         valid_indicator_count += 1
     
@@ -197,7 +202,7 @@ def generate_score_signal(df, company_name):
         valid_indicator_count += 1
 
     # 6. ADX (Mouvement Directionnel)
-    if not pd.isna(latest.get("ADX")) and not pd.isna(latest.get("plus_DI")):
+    if not pd.isna(latest.get("ADX")) and not pd.isna(latest.get("plus_DI")) and not pd.isna(latest.get("minus_DI")):
         score_adx = 3
         if latest["ADX"] > 25: 
             if latest["plus_DI"] > latest["minus_DI"]: score_adx = 4 
@@ -212,14 +217,14 @@ def generate_score_signal(df, company_name):
 
     # --- Agrégation Finale ---
     
-    if valid_indicator_count == 0:
-        return 3.0, "Hold", {}, "Aucun indicateur n'a pu être calculé pour la dernière date."
+    if valid_indicator_count <= 1: # Si seul le score d'actualité est valide, on retourne Hold
+        return 3.0, "Hold", {}, "Seul le score d'actualité est disponible (manque données techniques)."
 
     final_rating = sum(scores.values()) / valid_indicator_count
     
     # Détermination du signal
     if final_rating > 4.2: final_signal = "Acheter Fort"
-    elif final_rating > 2.87: final_signal = "Acheter"
+    elif final_rating > 2.89: final_signal = "Acheter"
     elif final_rating < 1.8: final_signal = "Vendre Fort"
     elif final_rating < 2.25: final_signal = "Vendre"
     else: final_signal = "Hold"
@@ -235,7 +240,7 @@ def generate_score_signal(df, company_name):
 final_rating, final_signal, individual_scores, news_status = generate_score_signal(df, selected_company)
 
 # --- 1. Graphe Classique (Toujours en haut) ---
-st.subheader(f"📈 {selected_company} — Graphique classique (Prix de Clôture)")
+st.subheader(f"📈 {selected_company} — Graphique classique (Prix de Clôture) sur 1 Mois")
 fig_classique = go.Figure()
 fig_classique.add_trace(go.Scatter(
     x=df["Date"], y=df["Close"], mode="lines", name="Prix Close", line=dict(color="blue")
@@ -250,36 +255,42 @@ col1, col2 = st.columns([3, 1])
 with col2:
     st.subheader("Analyse Synthétique")
 
-    # Note Finale
-    st.metric("Note Technique Finale / 5", f"{final_rating:.2f}")
-    full_stars = int(round(final_rating))
-    st.write("Note visuelle:", "★" * full_stars + "☆" * (5 - full_stars))
-    
-    st.markdown("---")
-    
-    # Signal Final
-    if "Fort" in final_signal:
-         if "Acheter" in final_signal:
-            st.success(f"Signal : **{final_signal}** 🚀")
-         else:
-            st.error(f"Signal : **{final_signal}** 🔻")
-    elif final_signal == "Acheter":
-        st.success(f"Signal : **{final_signal}**")
-    elif final_signal == "Vendre":
-        st.error(f"Signal : **{final_signal}**")
+    # Affichage conditionnel basé sur le message d'état
+    if individual_scores.get('Actualités (Fund.)') is None and final_signal == "Hold":
+         # Si le score d'actualité n'a pas été calculé ET que le signal est Hold par défaut
+         st.warning("⚠️ Chargement en cours ou données insuffisantes pour l'analyse technique.")
+         st.markdown(f"*{individual_scores.get('Actualités (Fund.)', 'Veuillez patienter ou vérifier la connexion.')}*") # Affichage du statut
     else:
-        st.warning(f"Signal : **{final_signal}**")
-
-    st.markdown("---")
-    st.caption("Détail des scores (5=Achat Fort, 1=Vente Forte) :")
-    
-    # Afficher le détail des scores individuels
-    for indicator, score in individual_scores.items():
-        if indicator == "Actualités (Fund.)":
-            st.markdown(f"- **{indicator}**: {'⭐' * int(round(score))} ({score:.1f}) _({news_status})_")
+        # Note Finale
+        st.metric("Note Technique Finale / 5", f"{final_rating:.2f}")
+        full_stars = int(round(final_rating))
+        st.write("Note visuelle:", "★" * full_stars + "☆" * (5 - full_stars))
+        
+        st.markdown("---")
+        
+        # Signal Final
+        if "Fort" in final_signal:
+             if "Acheter" in final_signal:
+                st.success(f"Signal : **{final_signal}** 🚀")
+             else:
+                st.error(f"Signal : **{final_signal}** 🔻")
+        elif final_signal == "Acheter":
+            st.success(f"Signal : **{final_signal}**")
+        elif final_signal == "Vendre":
+            st.error(f"Signal : **{final_signal}**")
         else:
-            color = 'green' if score >= 4 else ('red' if score <= 2 else 'orange')
-            st.markdown(f"- **{indicator}**: <span style='color:{color};'>{'★' * int(round(score))} ({score:.1f})</span>", unsafe_allow_html=True)
+            st.warning(f"Signal : **{final_signal}**")
+
+        st.markdown("---")
+        st.caption("Détail des scores (5=Achat Fort, 1=Vente Forte) :")
+        
+        # Afficher le détail des scores individuels
+        for indicator, score in individual_scores.items():
+            if indicator == "Actualités (Fund.)":
+                st.markdown(f"- **{indicator}**: {'⭐' * int(round(score))} ({score:.1f}) _({news_status})_")
+            else:
+                color = 'green' if score >= 4 else ('red' if score <= 2 else 'orange')
+                st.markdown(f"- **{indicator}**: <span style='color:{color};'>{'★' * int(round(score))} ({score:.1f})</span>", unsafe_allow_html=True)
             
 with col1:
     # Graphe technique (à gauche)
@@ -291,7 +302,7 @@ with col1:
         if selected_technique in ["Leçon 1 : Les Tendances", "Leçon 2 : Les Moyennes Mobiles"]:
             fig_technique.add_trace(go.Candlestick(x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Prix"))
             fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["SMA_5"], name="SMA 5", line=dict(color="blue")))
-            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["SMA_20"], name="SMA 20", line=dict(color="orange")))
+            fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["SMA_20"], name="SMA 20", line=dict(color="orange"))) 
 
         elif selected_technique == "Leçon 3 : La MACD":
             fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["MACD"], name="MACD"))
