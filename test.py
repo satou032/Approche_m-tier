@@ -327,7 +327,7 @@ def generate_score_signal(df, company_name):
     elif final_rating > 3.4: final_signal = "Acheter"
     elif final_rating < 1.8: final_signal = "Vendre Fort"
     elif final_rating < 2.6: final_signal = "Vendre"
-    else: final_signal = "Hold" 
+    else: final_signal = "Ne Rien Faire" 
         
     return final_rating, final_signal, scores, news_label
 
@@ -449,8 +449,8 @@ with col1:
             fig_technique = go.Figure()
             fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["Stoch_K"], name="%K"))
             fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["Stoch_D"], name="%D"))
-            fig_technique.add_hline(y=80, line_dash="dash", annotation_text="Overbought", line=dict(color="blue"))
-            fig_technique.add_hline(y=20, line_dash="dash", annotation_text="Oversold", line=dict(color="orange"))
+            fig_technique.add_hline(y=80, line_dash="dash", annotation_text="Surachat", line=dict(color="blue"))
+            fig_technique.add_hline(y=20, line_dash="dash", annotation_text="Survente", line=dict(color="orange"))
 
         # Leçon 6 : Les Chandeliers
         elif selected_technique == "Leçon 6 : Les Chandeliers":
@@ -461,8 +461,8 @@ with col1:
         elif selected_technique == "Leçon 7 : Le RSI":
             fig_technique = go.Figure()
             fig_technique.add_trace(go.Scatter(x=df["Date"], y=df["RSI_14"], name="RSI 14"))
-            fig_technique.add_hline(y=70, line_dash="dash", annotation_text="Overbought", line=dict(color="red"))
-            fig_technique.add_hline(y=30, line_dash="dash", annotation_text="Oversold", line=dict(color="green"))
+            fig_technique.add_hline(y=70, line_dash="dash", annotation_text="Surachat", line=dict(color="red"))
+            fig_technique.add_hline(y=30, line_dash="dash", annotation_text="Survente", line=dict(color="green"))
 
         # Leçon 15 : Le Momentum (Affiche Prix + Momentum, conforme à l'exemple)
         elif selected_technique == "Leçon 15 : Le Momentum":
