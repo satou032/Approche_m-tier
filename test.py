@@ -17,11 +17,11 @@ second_logo_path = "logo_equipe2.png"
 col_logo_left, col_spacer, col_logo_right = st.columns([1, 5, 1]) 
 
 with col_logo_left:
-    st.image(logo_esigelec_path, width=200) # Ajustez la largeur si nécessaire
+    st.image(logo_esigelec_path, width=400) # Ajustez la largeur si nécessaire
 
 with col_logo_right:
     
-    st.image(second_logo_path, width=200)
+    st.image(second_logo_path, width=400)
 
 # Configuration Streamlit
 st.set_page_config(layout="wide", page_title="Dashboard d'Analyse Technique")
@@ -153,6 +153,16 @@ def load_and_calculate_data(ticker, period_yf):
         # Pour 5 jours, on passe en 30 minutes pour avoir assez de bougies
         # (environ 70 bougies sur 5 jours, suffisant pour la SMA 20 et les Bollingers)
         df = yf.download(ticker, period="5d", interval="30m", auto_adjust=True)
+
+    elif period_yf == "1mo":
+        # Pour 5 jours, on passe en 30 minutes pour avoir assez de bougies
+        # (environ 70 bougies sur 5 jours, suffisant pour la SMA 20 et les Bollingers)
+        df = yf.download(ticker, period="1mo", interval="1h", auto_adjust=True)
+
+    elif period_yf == "3mo":
+        # Pour 5 jours, on passe en 30 minutes pour avoir assez de bougies
+        # (environ 70 bougies sur 5 jours, suffisant pour la SMA 20 et les Bollingers)
+        df = yf.download(ticker, period="3mo", interval="1h", auto_adjust=True)
     else:
         df = yf.download(ticker, period=period_yf, interval="1d", auto_adjust=True) 
         
