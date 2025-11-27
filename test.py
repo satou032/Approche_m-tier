@@ -10,9 +10,24 @@ import urllib.parse
 import requests 
 from textblob import TextBlob 
 
+logo_esigelec_path = "esigelec.png" 
+second_logo_path = "logo_equipe2.png" 
+
+
+col_logo_left, col_spacer, col_logo_right = st.columns([1, 5, 1]) 
+
+with col_logo_left:
+    st.image(logo_esigelec_path, width=200) # Ajustez la largeur si nécessaire
+
+with col_logo_right:
+    
+    st.image(second_logo_path, width=200)
+
 # Configuration Streamlit
 st.set_page_config(layout="wide", page_title="Dashboard d'Analyse Technique")
-st.title("📊 Dashboard d'Analyse Technique")
+st.title("📊 Objectif Gain")
+
+
 
 # ----------------------------------------------------------------------
 # Dictionnaires Statiques (Sentiment et Options)
@@ -154,7 +169,7 @@ def load_and_calculate_data(ticker, period_yf):
     else:
         # Si pas de timezone, on suppose UTC et on convertit
         df["Date"] = df["Date"].dt.tz_localize("UTC").dt.tz_convert("Europe/Paris")
-        
+
     df.dropna(subset=['Close', 'Volume'], inplace=True)
     
     if df.empty:
